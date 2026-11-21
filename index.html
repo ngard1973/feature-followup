@@ -25,6 +25,33 @@ nav{display:flex;gap:6px;margin-bottom:12px}nav button{margin:0;padding:9px;font
 <div class="ban">PROTOTYPE — sample instructions only. Do not send to real customers yet.</div>
 <header>Feature <span>Follow-Up</span></header>
 <main id="app"></main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+<script>
+let deliveryReplayDb = null;
+let confusionReportInFlight = false;
+
+try {
+  const publishableKey = cmbreoocqgzilymsgfwy;
+
+  if (publishableKey.startsWith("sb_publishable_")) {
+    deliveryReplayDb = window.supabase.createClient(
+      "https://cmbreoocqgzilymsgfwy.supabase.co",
+      publishableKey,
+      {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false
+        }
+      }
+    );
+  }
+} catch {
+  // Keep the prototype usable if the connection cannot initialize.
+}
+</script>
 <script>
 const FEATS={Phone:[["bt","Bluetooth phone pairing",1,["Open Settings on the touchscreen.","Choose Phone, then Add Phone.","Pick the vehicle name on your phone and confirm the code."]],["cp","Wireless Apple CarPlay / Android Auto",1,["Turn on Bluetooth and Wi-Fi on your phone.","Pair the phone, then accept the CarPlay/Android Auto prompt.","Next time it connects automatically."]],["app","Manufacturer app & remote start",3,["Download the brand app and sign in.","Add the vehicle using your VIN.","Use Remote Start from the app home screen."]]],
 Safety:[["acc","Adaptive cruise control",3,["Press the cruise button to arm.","Set speed with SET.","Use the gap button to change following distance."]],["lka","Lane keep assist",7,["Press the lane keep button on the steering wheel or console.","A green steering-wheel icon means it is active."]],["bsm","Blind zone alert",7,["Watch for the light in the side mirror.","It flashes if you signal while a vehicle is beside you."]]],
@@ -53,7 +80,24 @@ m.className="msg";m.textContent="Looking up…";try{const r=await fetch("https:/
 veh.year=j.ModelYear||"";veh.make=j.Make||"";veh.model=j.Model||"";veh.trim=j.Trim||"";setup();$("#vm").className="msg ok";$("#vm").textContent="Decoded. Please confirm the details."+(veh.trim?"":" Trim not provided; type it in.")}
 catch(x){m.className="msg bad";m.textContent="Lookup failed. Type the details in by hand."}}
 function make(){grab();const o=$("#out");if(!veh.model||!sel.size){o.innerHTML='<p class="msg bad">Add the model and at least one feature.</p>';return}
-const d={v:[veh.year,veh.make,veh.model,veh.trim].filter(Boolean).join(" "),c:cust,n:st.name,p:st.phone,f:[...sel]};
+let salespersonId = localStorage.getItem("ffu_salesperson_id");
+
+if (!salespersonId) {
+  salespersonId = crypto.randomUUID();
+  localStorage.setItem("ffu_salesperson_id", salespersonId);
+}
+
+const d = {
+  v: [veh.year, veh.make, veh.model, veh.trim]
+    .filter(Boolean)
+    .join(" "),
+  c: cust,
+  n: st.name,
+  p: st.phone,
+  f: [...sel],
+  salesperson_id: salespersonId,
+  customer_token: crypto.randomUUID()
+};
 const url=location.origin+location.pathname+"#c="+encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(d)))));
 const L=JSON.parse(localStorage.ffu_list||"[]");L.unshift({c:cust||"Customer",v:d.v,t:new Date().toLocaleDateString(),url});localStorage.ffu_list=JSON.stringify(L);
 const txt=`Hi ${cust||"there"}, it's ${st.name||"your salesperson"}. Here are quick how-tos for the features we went over on your ${d.v}: ${url}`,ph=$("#cph").value.replace(/\D/g,"");
@@ -61,7 +105,70 @@ o.innerHTML=`<p class="msg ok">Link ready.</p><a href="sms:${ph}${/iPhone|iPad/.
 function list(){const L=JSON.parse(localStorage.ffu_list||"[]");app.innerHTML=nav('l')+`<div class="card"><h2>Customers (saved on this phone only)</h2>${L.length?L.map(x=>`<div class="feat"><span>${x.c}<br><span class="small">${x.v} · ${x.t}</span></span><a href="${x.url}" target="_blank">Open</a></div>`).join(""):'<p class="small">No links sent yet.</p>'}</div>`}
 function me(){app.innerHTML=nav('m')+`<div class="card"><h2>My info</h2><label>Your name</label><input id="mn" value="${st.name}"><label>Your phone</label><input id="mp" type="tel" value="${st.phone}"><button onclick="st.name=$('#mn').value;st.phone=$('#mp').value;localStorage.ffu_me=JSON.stringify(st);this.textContent='Saved'">Save</button></div>`}
 function custView(d){const S=JSON.parse(localStorage["ffu_s_"+location.hash]||"{}");const save=()=>localStorage["ffu_s_"+location.hash]=JSON.stringify(S);
-window.mark=(id,v)=>{S[id]=v;save();custView(d)};
+window.mark = async (id, value) => {
+  // "Got it" continues to save on the customer's device.
+  if (value !== "c") {
+    S[id] = value;
+    save();
+    custView(d);
+    return;
+  }
+
+  // Avoid sending another report while one is being saved.
+  if (confusionReportInFlight) return;
+
+  // Older links do not contain the new report identifiers.
+  if (!d.salesperson_id || !d.customer_token) {
+    alert(
+      "This older link cannot send help requests. " +
+      "Please contact your salesperson for a new link."
+    );
+    return;
+  }
+
+  if (!deliveryReplayDb) {
+    alert(
+      "Help requests are unavailable. " +
+      "Please contact your salesperson directly."
+    );
+    return;
+  }
+
+  confusionReportInFlight = true;
+
+  try {
+    const { error } = await deliveryReplayDb
+      .from("confusion_alerts")
+      .insert({
+        salesperson_id: d.salesperson_id,
+        customer_token: d.customer_token,
+        card_id: id
+      });
+
+    if (error) {
+      alert(
+        "Your request was not saved. Error code: " +
+        (error.code || "unknown") +
+        ". Please contact your salesperson directly."
+      );
+      return;
+    }
+
+    // Mark the card only after Supabase confirms success.
+    S[id] = "c";
+    save();
+    custView(d);
+
+    alert("Your request for help was saved.");
+  } catch {
+    alert(
+      "Could not confirm whether your request was saved. " +
+      "Please contact your salesperson directly."
+    );
+  } finally {
+    confusionReportInFlight = false;
+  }
+};
 app.innerHTML=`<div class="card"><h2>Hi ${d.c||"there"}, enjoy your ${d.v}</h2><p class="small">Quick how-tos for what we covered.${d.n?` Questions? ${d.n}${d.p?` · <a href="tel:${d.p}">${d.p}</a>`:""}`:""}</p></div>`+
 d.f.filter(id=>ALL[id]).sort((a,b)=>ALL[a].day-ALL[b].day).map(id=>{const f=ALL[id];return`<div class="card"><h2>${f.name} <span class="tag">Day ${f.day}</span></h2><ol>${f.steps.map(s=>`<li>${s}</li>`).join("")}</ol>
 <div class="row"><button class="${S[id]=='g'?'amb':'alt'}" onclick="mark('${id}','g')">Got it</button><button class="${S[id]=='c'?'amb':'alt'}" onclick="mark('${id}','c')">Still confused</button></div></div>`}).join("")}
